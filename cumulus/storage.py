@@ -2,11 +2,11 @@ import logging
 import mimetypes
 import os
 import re
-import hashlib
+
+from StringIO import StringIO
+from gzip import GzipFile
 from httplib import HTTPException
 from ssl import SSLError
-from gzip import GzipFile
-from StringIO import StringIO
 
 import cloudfiles
 from cloudfiles.errors import NoSuchObject, ResponseError
@@ -182,7 +182,7 @@ class CloudFilesStorage(Storage):
         (called ``name``).
         """
         (path, last) = os.path.split(name)
- 
+
         # Avoid infinite loop if path is '/'
         if path and path != '/':
             try:
@@ -192,7 +192,7 @@ class CloudFilesStorage(Storage):
 
         content.open()
         cloud_obj = self.container.create_object(name)
-        
+
         # If the objects has a hash, it already exists. The hash is md5 of
         # the content. If the hash has not changed, do not send the file over
         # again.
@@ -342,7 +342,7 @@ class CloudFilesStorage(Storage):
         date = parser.parse(obj.last_modified)
 
         # if the date has no timezone, assume UTC
-        if date.tzinfo == None:
+        if date.tzinfo is None:
             date = date.replace(tzinfo=tz.tzutc())
 
         # convert date to local time w/o timezone
