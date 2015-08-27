@@ -2,6 +2,7 @@ import logging
 import mimetypes
 import os
 import re
+import socket
 
 from StringIO import StringIO
 from gzip import GzipFile
@@ -9,8 +10,7 @@ from httplib import HTTPException
 from ssl import SSLError
 
 import cloudfiles
-from cloudfiles.errors import NoSuchObject, ResponseError
-
+from cloudfiles.errors import IncompleteSend, NoSuchObject, ResponseError
 from django.core.files.base import File, ContentFile
 from django.core.files.storage import Storage
 
@@ -158,16 +158,14 @@ class CloudFilesStorage(Storage):
         tries = 0
         while True:
             try:
-                tries += 1
                 return self.container.get_object(name)
             except (HTTPException, SSLError, ResponseError), e:
                 if tries >= self.max_retries:
                     raise
+                tries += 1
                 logger.warning('Failed to retrieve %s: %r (attempt %d/%d)' % (
                     name, e, tries, self.max_retries))
-                # re-init the content and connection before retrying
-                if hasattr(content, 'seek'):
-                    content.seek(0)
+                # re-init the connection before retrying
                 self.connection.http_connect()
 
     def _open(self, name, mode='rb'):
@@ -188,10 +186,30 @@ class CloudFilesStorage(Storage):
             try:
                 self._get_cloud_obj(path)
             except NoSuchObject:
-                self._save(path, CloudStorageDirectory(path))
+                tries = 0
+                while True:
+                    try:
+                        self._save(path, CloudStorageDirectory(path))
+                        break
+                    except (HTTPException, SSLError, ResponseError) as e:
+                        if tries >= self.max_retries:
+                            raise
+                        tries += 1
+                        logger.warning('Failed to save %s: %r (attempt %d/%d)' % (
+                            name, e, tries, self.max_retries))
 
         content.open()
-        cloud_obj = self.container.create_object(name)
+        tries = 0
+        while True:
+            try:
+                cloud_obj = self.container.create_object(name)
+                break
+            except (HTTPException, SSLError, ResponseError) as e:
+                if tries >= self.max_retries:
+                    raise
+                tries += 1
+                logger.warning('Failed to create_object %s: %r (attempt %d/%d)' % (
+                    name, e, tries, self.max_retries))
 
         # If the objects has a hash, it already exists. The hash is md5 of
         # the content. If the hash has not changed, do not send the file over
@@ -224,17 +242,20 @@ class CloudFilesStorage(Storage):
         tries = 0
         while True:
             try:
-                tries += 1
                 cloud_obj.send(content)
-                content.close()
                 break
-            except (HTTPException, SSLError, ResponseError), e:
+            except (HTTPException, SSLError, ResponseError, IncompleteSend, socket.error) as e:
                 if tries >= self.max_retries:
                     raise
+                tries += 1
                 logger.warning('Failed to send %s: %r (attempt %d/%d)' % (
                     name, e, tries, self.max_retries))
-                # re-init the connection before retrying
+                # re-init the content and connection before retrying
+                if hasattr(content, 'seek'):
+                    content.seek(0)
                 self.connection.http_connect()
+            else:
+                content.close()
         # if it went through, apply the custom headers
         sync_headers(cloud_obj)
         return name
@@ -247,7 +268,6 @@ class CloudFilesStorage(Storage):
         tries = 0
         while True:
             try:
-                tries += 1
                 self.container.delete_object(name)
                 break
             except (HTTPException, SSLError, ResponseError), e:
@@ -255,6 +275,7 @@ class CloudFilesStorage(Storage):
                     break
                 if tries >= self.max_retries:
                     raise
+                tries += 1
                 logger.warning('Failed to delete %s: %r (attempt %d/%d)' % (
                     name, e, tries, self.max_retries))
                 # re-init the connection before retrying
