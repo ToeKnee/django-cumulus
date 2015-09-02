@@ -12,7 +12,7 @@ from ssl import SSLError
 import cloudfiles
 from cloudfiles.errors import IncompleteSend, NoSuchObject, ResponseError
 from django.core.files.base import File, ContentFile
-from django.core.files.storage import Storage
+from django.core.files.storage import get_storage_class, Storage
 
 from .settings import CUMULUS
 
@@ -405,6 +405,20 @@ class CloudFilesStaticStorage(CloudFilesStorage):
     STATICFILES_STORAGE = 'cumulus.storage.CloudFilesStaticStorage'.
     """
     container_name = CUMULUS['STATIC_CONTAINER']
+
+
+class CachedCloudFilesStaticStorage(CloudFilesStaticStorage):
+    """
+    Cloud Files storage backend that saves the files locally, too.
+    """
+    def __init__(self, *args, **kwargs):
+        super(CachedCloudFilesStaticStorage, self).__init__(*args, **kwargs)
+        self.local_storage = get_storage_class("compressor.storage.CompressorFileStorage")()
+
+    def save(self, name, content):
+        name = super(CachedCloudFilesStaticStorage, self).save(name, content)
+        self.local_storage._save(name, content)
+        return name
 
 
 class CloudFilesStorageFile(File):
