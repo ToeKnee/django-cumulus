@@ -3,11 +3,12 @@ An interface to Rackspace Cloud Files through Django.
 """
 __version_info__ = {
     'major': 1,
-    'minor': 1,
-    'micro': 0,
+    'minor': 2,
+    'micro': 1,
     'releaselevel': 'final',
     'serial': 1
 }
+
 
 def get_version():
     vers = ["%(major)i.%(minor)i" % __version_info__, ]
