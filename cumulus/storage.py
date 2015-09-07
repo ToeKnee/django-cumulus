@@ -39,7 +39,17 @@ def sync_headers(cloud_obj, headers={}, header_patterns=HEADER_PATTERNS):
     matched_headers.update(headers)  # explicitly set headers overwrite matches and already set headers
     if matched_headers != cloud_obj.headers:
         cloud_obj.headers = matched_headers
-        cloud_obj.sync_metadata()
+        tries = 0
+        max_retries = CUMULUS['MAX_RETRIES']
+        while True:
+            try:
+                cloud_obj.sync_metadata()
+            except (HTTPException, SSLError, ResponseError), e:
+                if tries >= max_retries:
+                    raise
+                tries += 1
+                logger.warning('Failed to sync metadata %s: %r (attempt %d/%d)' % (
+                    cloud_obj, e, tries, max_retries))
 
 
 def get_gzipped_contents(input_file):
