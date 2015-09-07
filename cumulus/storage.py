@@ -220,6 +220,8 @@ class CloudFilesStorage(Storage):
                 tries += 1
                 logger.warning('Failed to create_object %s: %r (attempt %d/%d)' % (
                     name, e, tries, self.max_retries))
+                # Reset the container and try again
+                del self._container
 
         # If the objects has a hash, it already exists. The hash is md5 of
         # the content. If the hash has not changed, do not send the file over
