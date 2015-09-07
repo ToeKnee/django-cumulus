@@ -425,8 +425,8 @@ class CachedCloudFilesStaticStorage(CloudFilesStaticStorage):
         super(CachedCloudFilesStaticStorage, self).__init__(*args, **kwargs)
         self.local_storage = get_storage_class("compressor.storage.CompressorFileStorage")()
 
-    def save(self, name, content):
-        name = super(CachedCloudFilesStaticStorage, self).save(name, content)
+    def _save(self, name, content):
+        name = super(CachedCloudFilesStaticStorage, self)._save(name, content)
         self.local_storage._save(name, content)
         return name
 
