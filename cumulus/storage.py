@@ -2,164 +2,104 @@ import logging
 import mimetypes
 import os
 import re
+import pyrax
 import socket
 
-from StringIO import StringIO
-from gzip import GzipFile
 from httplib import HTTPException
+from io import UnsupportedOperation
 from ssl import SSLError
+from pyrax.exceptions import (
+    NoSuchObject,
+    ServiceResponseFailure,
+)
 
-import cloudfiles
-from cloudfiles.errors import IncompleteSend, NoSuchObject, ResponseError
-from django.core.files.base import File, ContentFile
+from django.core.files.base import File
 from django.core.files.storage import get_storage_class, Storage
+from django.utils.text import get_valid_filename
 
 from .settings import CUMULUS
 
 logger = logging.getLogger(__name__)
 
-HEADER_PATTERNS = tuple((re.compile(p), h) for p, h in CUMULUS.get('HEADERS', {}))
-
-
-def sync_headers(cloud_obj, headers={}, header_patterns=HEADER_PATTERNS):
-    """
-    Overwrite the given cloud_obj's headers with the ones given as ``headers`
-    and add additional headers as defined in the HEADERS setting depending on
-    the cloud_obj's file name.
-    """
-    # don't set headers on directories
-    content_type = getattr(cloud_obj, 'content_type', None)
-    if content_type == 'application/directory':
-        return
-    matched_headers = {}
-    for pattern, pattern_headers in header_patterns:
-        if pattern.match(cloud_obj.name):
-            matched_headers.update(pattern_headers.copy())
-    matched_headers.update(cloud_obj.headers)  # preserve headers already set
-    matched_headers.update(headers)  # explicitly set headers overwrite matches and already set headers
-    if matched_headers != cloud_obj.headers:
-        cloud_obj.headers = matched_headers
-        tries = 0
-        max_retries = CUMULUS['MAX_RETRIES']
-        while True:
-            try:
-                cloud_obj.sync_metadata()
-            except (HTTPException, SSLError, ResponseError), e:
-                if tries >= max_retries:
-                    raise
-                tries += 1
-                logger.warning('Failed to sync metadata %s: %r (attempt %d/%d)' % (
-                    cloud_obj, e, tries, max_retries))
-
-
-def get_gzipped_contents(input_file):
-    """
-    Return a gzipped version of a previously opened file's buffer.
-    """
-    zbuf = StringIO()
-    zfile = GzipFile(mode='wb', compresslevel=6, fileobj=zbuf)
-    zfile.write(input_file.read())
-    zfile.close()
-    return ContentFile(zbuf.getvalue())
+HEADER_PATTERNS = tuple(
+    (re.compile(p), h)
+    for p, h
+    in CUMULUS.get('HEADERS', {})
+)
 
 
 class CloudFilesStorage(Storage):
     """
     Custom storage for Rackspace Cloud Files.
     """
-    default_quick_listdir = True
     api_key = CUMULUS['API_KEY']
-    auth_url = CUMULUS['AUTH_URL']
-    connection_kwargs = CUMULUS['CONNECTION_ARGS']
     container_name = CUMULUS['CONTAINER']
-    timeout = CUMULUS['TIMEOUT']
     max_retries = CUMULUS['MAX_RETRIES']
-    use_servicenet = CUMULUS['SERVICENET']
-    username = CUMULUS['USERNAME']
+    pyrax_identity_type = CUMULUS['PYRAX_IDENTITY_TYPE']
+    timeout = CUMULUS['TIMEOUT']
     ttl = CUMULUS['TTL']
     use_ssl = CUMULUS['USE_SSL']
+    username = CUMULUS['USERNAME']
 
     def __init__(self, username=None, api_key=None, container=None, timeout=None,
-                 max_retries=None, connection_kwargs=None, container_uri=None):
+                 max_retries=None, container_uri=None):
         """
-        Initialize the settings for the connection and container.
+        Initialize the settings for the and container.
         """
         if username is not None:
             self.username = username
         if api_key is not None:
             self.api_key = api_key
-        if connection_kwargs is not None:
-            self.connection_kwargs = connection_kwargs
         if container is not None:
             self.container_name = container
         if timeout is not None:
             self.timeout = timeout
         if max_retries is not None:
             self.max_retries = max_retries
-        if connection_kwargs is not None:
-            self.connection_kwargs = connection_kwargs
-
         if container_uri is not None:
             self._container_public_uri = container_uri
         elif 'CONTAINER_URI' in CUMULUS:
             self._container_public_uri = CUMULUS['CONTAINER_URI']
 
+        pyrax.set_setting("identity_type", self.pyrax_identity_type)
+        pyrax.set_credentials(self.username, self.api_key)
+
     def __getstate__(self):
         """
         Return a picklable representation of the storage.
         """
-        return dict(username=self.username,
-                    api_key=self.api_key,
-                    container_name=self.container_name,
-                    timeout=self.timeout,
-                    use_servicenet=self.use_servicenet,
-                    connection_kwargs=self.connection_kwargs)
-
-    def _get_connection(self):
-        if not hasattr(self, '_connection'):
-            con = cloudfiles.get_connection(username=self.username,
-                                            api_key=self.api_key,
-                                            authurl=self.auth_url,
-                                            timeout=self.timeout,
-                                            servicenet=self.use_servicenet,
-                                            **self.connection_kwargs)
-            self._connection = con
-        return self._connection
-
-    def _set_connection(self, value):
-        self._connection = value
-
-    connection = property(_get_connection, _set_connection)
+        return {
+            "username": self.username,
+            "api_key": self.api_key,
+            "container_name": self.container_name,
+            "timeout": self.timeout,
+        }
 
     def _get_container(self):
         if not hasattr(self, '_container'):
-            self.container = self.connection.get_container(self.container_name)
+            self._container = pyrax.cloudfiles.get_container(self.container_name)
         return self._container
 
     def _set_container(self, container):
+        """Set the container (and, if needed, the configured TTL on
+        it), making the container publicly available.
+
         """
-        Set the container (and, if needed, the configured TTL on it), making
-        the container publicly available.
-        """
-        if container.cdn_ttl != self.ttl or not container.is_public():
-            container.make_public(ttl=self.ttl)
+        pyrax.cloudfiles.make_container_public(container.name, ttl=self.ttl)
         if hasattr(self, '_container_public_uri'):
             delattr(self, '_container_public_uri')
         self._container = container
 
     container = property(_get_container, _set_container)
 
-    def _get_container_url(self):
+    @property
+    def container_url(self):
         if not hasattr(self, '_container_public_uri'):
             if self.use_ssl:
-                self._container_public_uri = self.container.public_ssl_uri()
+                self._container_public_uri = self.container.cdn_ssl_uri
             else:
-                self._container_public_uri = self.container.public_uri()
-        if CUMULUS['CNAMES'] and self._container_public_uri in CUMULUS['CNAMES']:
-            self._container_public_uri = CUMULUS['CNAMES'][self._container_public_uri]
+                self._container_public_uri = self.container.cdn_uri
         return self._container_public_uri
-
-    container_url = property(_get_container_url)
 
     def _get_cloud_obj(self, name):
         """
@@ -169,20 +109,18 @@ class CloudFilesStorage(Storage):
         while True:
             try:
                 return self.container.get_object(name)
-            except (HTTPException, SSLError, ResponseError), e:
+            except (HTTPException, SSLError, ServiceResponseFailure), e:
                 if tries >= self.max_retries:
                     raise
                 tries += 1
                 logger.warning('Failed to retrieve %s: %r (attempt %d/%d)' % (
                     name, e, tries, self.max_retries))
-                # re-init the connection before retrying
-                self.connection.http_connect()
 
     def _open(self, name, mode='rb'):
         """
         Return the CloudFilesStorageFile.
         """
-        return CloudFilesStorageFile(storage=self, name=name)
+        return CloudFilesStorageFile(container=self, name=name)
 
     def _save(self, name, content):
         """
@@ -191,107 +129,83 @@ class CloudFilesStorage(Storage):
         """
         (path, last) = os.path.split(name)
 
-        # Avoid infinite loop if path is '/'
-        if path and path != '/':
-            try:
-                self._get_cloud_obj(path)
-            except NoSuchObject:
-                tries = 0
-                while True:
-                    try:
-                        self._save(path, CloudStorageDirectory(path))
-                        break
-                    except (HTTPException, SSLError, ResponseError) as e:
-                        if tries >= self.max_retries:
-                            raise
-                        tries += 1
-                        logger.warning('Failed to save %s: %r (attempt %d/%d)' % (
-                            name, e, tries, self.max_retries))
-
-        content.open()
-        tries = 0
-        while True:
-            try:
-                cloud_obj = self.container.create_object(name)
-                break
-            except (HTTPException, SSLError, ResponseError) as e:
-                if tries >= self.max_retries:
-                    raise
-                tries += 1
-                logger.warning('Failed to create_object %s: %r (attempt %d/%d)' % (
-                    name, e, tries, self.max_retries))
-                # Reset the container and try again
-                del self._container
-
-        # If the objects has a hash, it already exists. The hash is md5 of
-        # the content. If the hash has not changed, do not send the file over
-        # again.
+        # If the objects has a hash, it already exists. The hash is
+        # md5 of the content. If the hash has not changed, do not send
+        # the file over again.
         upload = True
-        if cloud_obj.etag:
-            if cloud_obj.etag == cloud_obj.compute_md5sum(content.file):
+        etag = pyrax.utils.get_checksum(content.file)
+        try:
+            cloud_obj = self._get_cloud_obj(name)
+        except NoSuchObject:
+            pass
+        else:
+            if cloud_obj.etag and cloud_obj.etag == etag:
                 upload = False
 
         if upload:
-            # If the content type is available, pass it in directly rather than
-            # getting the cloud object to try to guess.
+            content.open()
+            # If the content type is available, pass it in directly
+            # rather than getting the cloud object to try to guess.
             if hasattr(content.file, 'content_type'):
-                cloud_obj.content_type = content.file.content_type
+                content_type = content.file.content_type
             elif hasattr(content, 'content_type'):
-                cloud_obj.content_type = content.content_type
+                content_type = content.content_type
             else:
                 mime_type, encoding = mimetypes.guess_type(name)
-                cloud_obj.content_type = mime_type
-            # gzip the file if its of the right content type
-            if cloud_obj.content_type in CUMULUS.get('GZIP_CONTENT_TYPES', []):
-                content = get_gzipped_contents(content)
-                cloud_obj.headers['Content-Encoding'] = 'gzip'
-            # set file size
-            if hasattr(content.file, 'size'):
-                cloud_obj.size = content.file.size
-            else:
-                cloud_obj.size = content.size
-        # try sending the file <max_retries> tries
-        tries = 0
-        while True:
-            try:
-                cloud_obj.send(content)
-                break
-            except (HTTPException, SSLError, ResponseError, IncompleteSend, socket.error) as e:
-                if tries >= self.max_retries:
-                    raise
-                tries += 1
-                logger.warning('Failed to send %s: %r (attempt %d/%d)' % (
-                    name, e, tries, self.max_retries))
-                # re-init the content and connection before retrying
-                if hasattr(content, 'seek'):
-                    content.seek(0)
-                self.connection.http_connect()
-            else:
-                content.close()
-        # if it went through, apply the custom headers
-        sync_headers(cloud_obj)
+                content_type = mime_type
+
+            headers = self._headers_for(name)
+            # Try uploading the file
+            tries = 0
+            while True:
+                try:
+                    cloud_obj = self.container.upload_file(
+                        content.file,
+                        name,
+                        content_type,
+                        etag,
+                        headers=headers
+                    )
+
+                    break
+                except (HTTPException, SSLError, ServiceResponseFailure, socket.error) as e:
+                    if tries >= self.max_retries:
+                        raise
+                    tries += 1
+                    logger.warning('Failed to send %s: %r (attempt %d/%d)' % (
+                        name, e, tries, self.max_retries))
+                    # re-init the content before retrying
+                    if hasattr(content, 'seek'):
+                        content.seek(0)
+                else:
+                    content.close()
         return name
+
+    def _headers_for(self, name, header_patterns=HEADER_PATTERNS):
+        headers = {}
+        for pattern, pattern_headers in header_patterns:
+            if pattern.match(name):
+                headers.update(pattern_headers.copy())
+        return headers
 
     def delete(self, name):
         """
         Deletes the specified file from the storage system.
-        """
-        # try deleting the file <max_retries> tries
+        """, name
         tries = 0
         while True:
             try:
                 self.container.delete_object(name)
                 break
-            except (HTTPException, SSLError, ResponseError), e:
-                if getattr(e, 'status', None) == 404:
-                    break
+            except NoSuchObject:
+                # It doesn't exist and that's ok
+                break
+            except (HTTPException, SSLError, ServiceResponseFailure) as e:
                 if tries >= self.max_retries:
                     raise
                 tries += 1
                 logger.warning('Failed to delete %s: %r (attempt %d/%d)' % (
                     name, e, tries, self.max_retries))
-                # re-init the connection before retrying
-                self.connection.http_connect()
 
     def exists(self, name):
         """
@@ -304,59 +218,39 @@ class CloudFilesStorage(Storage):
         except NoSuchObject:
             return False
 
+    def get_valid_name(self, name):
+        """Returns a filename, based on the provided filename,
+        that's suitable for use in the target storage system.
+
+        """
+        return get_valid_filename(name)
+
     def listdir(self, path):
+        """Lists the contents of the specified path, returning a
+        2-tuple; the first being directories, the second being a list
+        of filenames.
         """
-        Lists the contents of the specified path, returning a 2-tuple; the
-        first being an empty list of directories (not available for quick-
-        listing), the second being a list of filenames.
-
-        If the list of directories is required, use the full_listdir method.
-        """
-        files = []
         if path and not path.endswith('/'):
             path = '%s/' % path
-        path_len = len(path)
-        for name in self.container.list_objects(path=path):
-            files.append(name[path_len:])
+
+        files = [f.name for f in self.container.list_all(prefix=path)]
         return ([], files)
-
-    def full_listdir(self, path):
-        """
-        Lists the contents of the specified path, returning a 2-tuple of lists;
-        the first item being directories, the second item being files.
-
-        On large containers, this may be a slow operation for root containers
-        because every single object must be returned (cloudfiles does not
-        provide an explicit way of listing directories).
-        """
-        dirs = set()
-        files = []
-        if path and not path.endswith('/'):
-            path = '%s/' % path
-        path_len = len(path)
-        for name in self.container.list_objects(prefix=path):
-            name = name[path_len:]
-            slash = name[1:-1].find('/') + 1
-            if slash:
-                dirs.add(name[:slash])
-            elif name:
-                files.append(name)
-        dirs = list(dirs)
-        dirs.sort()
-        return (dirs, files)
 
     def size(self, name):
         """
         Returns the total size, in bytes, of the file specified by name.
         """
-        return self._get_cloud_obj(name).size
+        return self._get_cloud_obj(name).total_bytes
 
     def url(self, name):
         """
         Returns an absolute URL where the file's contents can be accessed
         directly by a web browser.
         """
-        return '%s/%s' % (self.container_url, name)
+        return '{container_url}/{name}'.format(
+            container_url=self.container_url,
+            name=name
+        )
 
     def modified_time(self, name):
         # CloudFiles return modified date in different formats
@@ -381,29 +275,6 @@ class CloudFilesStorage(Storage):
         # convert date to local time w/o timezone
         date = date.astimezone(tz.tzlocal()).replace(tzinfo=None)
         return date
-
-
-class CloudStorageDirectory(File):
-    """
-    A File-like object that creates a directory at cloudfiles
-    """
-
-    def __init__(self, name):
-        super(CloudStorageDirectory, self).__init__(StringIO(), name=name)
-        self.file.content_type = 'application/directory'
-        self.size = 0
-
-    def __str__(self):
-        return 'directory'
-
-    def __nonzero__(self):
-        return True
-
-    def open(self, mode=None):
-        self.seek(0)
-
-    def close(self):
-        pass
 
 
 class CloudFilesStaticStorage(CloudFilesStorage):
@@ -436,29 +307,24 @@ class CachedCloudFilesStaticStorage(CloudFilesStaticStorage):
 class CloudFilesStorageFile(File):
     closed = False
 
-    def __init__(self, storage, name, *args, **kwargs):
-        self._storage = storage
-        self._pos = 0
+    def __init__(self, container, name, *args, **kwargs):
+        self._container = container
         super(CloudFilesStorageFile, self).__init__(file=None, name=name,
                                                     *args, **kwargs)
 
-    def _get_pos(self):
-        return self._pos
-
     def _get_size(self):
         if not hasattr(self, '_size'):
-            self._size = self._storage.size(self.name)
+            self._size = self._container.size(self.name)
         return self._size
 
     def _set_size(self, size):
         self._size = size
-
     size = property(_get_size, _set_size)
 
     def _get_file(self):
         if not hasattr(self, '_file'):
-            self._file = self._storage._get_cloud_obj(self.name)
-            self._file.tell = self._get_pos
+            self._file = self._container._get_cloud_obj(self.name)
+            self._pos = 0
         return self._file
 
     def _set_file(self, value):
@@ -467,70 +333,38 @@ class CloudFilesStorageFile(File):
                 del self._file
         else:
             self._file = value
-
     file = property(_get_file, _set_file)
 
+    def __iter__(self):
+        for chunk in self.chunks():
+            yield chunk
+
+    def chunks(self, chunk_size=None):
+        """Read the file and yield chunks of ``chunk_size`` bytes
+        (defaults to ``UploadedFile.DEFAULT_CHUNK_SIZE``).
+
+        """
+        if not chunk_size:
+            chunk_size = self.DEFAULT_CHUNK_SIZE
+
+        try:
+            self.seek(0)
+        except (AttributeError, UnsupportedOperation):
+            pass
+
+        while True:
+            data = self.file.get(chunk_size=chunk_size)
+            if not data:
+                break
+            yield data
+
     def read(self, num_bytes=0):
-        if self._pos == self._get_size():
+        if self._pos == self.size:
             return ""
-        if num_bytes and self._pos + num_bytes > self._get_size():
-            num_bytes = self._get_size() - self._pos
-        data = self.file.read(size=num_bytes or -1, offset=self._pos)
+
+        if num_bytes and self._pos + num_bytes > self.size:
+            num_bytes = self.size - self._pos
+
+        data = self.file.get()
         self._pos += len(data)
         return data
-
-    def open(self, *args, **kwargs):
-        """
-        Open the cloud file object.
-        """
-        self._pos = 0
-
-    def close(self, *args, **kwargs):
-        self._pos = 0
-
-    @property
-    def closed(self):
-        return not hasattr(self, '_file')
-
-    def seek(self, pos):
-        self._pos = pos
-
-
-class ThreadSafeCloudFilesStorage(CloudFilesStorage):
-    """
-    Extends CloudFilesStorage to make it mostly thread safe.
-
-    As long as you don't pass container or cloud objects
-    between threads, you'll be thread safe.
-
-    Uses one cloudfiles connection per thread.
-    """
-
-    def __init__(self, *args, **kwargs):
-        super(ThreadSafeCloudFilesStorage, self).__init__(*args, **kwargs)
-
-        import threading
-        self.local_cache = threading.local()
-
-    def _get_connection(self):
-        if not hasattr(self.local_cache, 'connection'):
-            connection = cloudfiles.get_connection(username=self.username,
-                                                   api_key=self.api_key,
-                                                   authurl=self.auth_url,
-                                                   timeout=self.timeout,
-                                                   servicenet=self.use_servicenet,
-                                                   **self.connection_kwargs)
-            self.local_cache.connection = connection
-
-        return self.local_cache.connection
-
-    connection = property(_get_connection, CloudFilesStorage._set_connection)
-
-    def _get_container(self):
-        if not hasattr(self.local_cache, 'container'):
-            container = self.connection.get_container(self.container_name)
-            self.local_cache.container = container
-
-        return self.local_cache.container
-
-    container = property(_get_container, CloudFilesStorage._set_container)
