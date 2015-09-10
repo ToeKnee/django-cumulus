@@ -7,6 +7,7 @@ from cumulus.tests.models import Thing
 
 cloudfiles_storage = CloudFilesStorage()
 
+
 class CumulusTests(TestCase):
     def setUp(self):
         "Set up tiny files to test with."
@@ -21,11 +22,11 @@ class CumulusTests(TestCase):
         self.assertEqual(self.thing.image.height, 1)
         self.assertEqual(self.thing.image.size, 695)
         self.assertTrue("rackcdn.com" in self.thing.image.url,
-                     "URL is not a valid Cloud Files CDN URL.")
+                        "URL is not a valid Cloud Files CDN URL.")
 
         self.assertEqual(self.thing.document.size, 12)
         self.assertTrue("rackcdn.com" in self.thing.document.url,
-                     "URL is not a valid Cloud Files CDN URL.")
+                        "URL is not a valid Cloud Files CDN URL.")
         delattr(self.thing.document.storage, '_container_public_uri')
         self.thing.document.storage.use_ssl = True
         self.assertTrue(self.thing.document.url.startswith("https"))
