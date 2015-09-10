@@ -1,6 +1,14 @@
 changelog
 =========
 
+Version 2.0.0, 10 September 2015
+********************************
+
+* Migrate from python-cloudfiles to pyrax
+* Remove unneeded context_processors
+* Remove unused management commands
+
+
 Version 1.0.5, 30 January 2012
 ******************************
 
