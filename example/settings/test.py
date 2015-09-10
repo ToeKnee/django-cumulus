@@ -1,7 +1,5 @@
-from common import *  # noqa
+from common import *
 
 INSTALLED_APPS += (
     'cumulus.tests',
 )
-
-CUMULUS["PYRAX_IDENTITY_TYPE"] = 'rackspace'

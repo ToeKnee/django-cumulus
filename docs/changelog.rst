@@ -1,28 +1,17 @@
 changelog
 =========
 
-Version 1.2, (in progress)
+Version 2.0.0, 10 September 2015
 ********************************
 
-* Revive the changelog
-* Rename legacy SwiftclientStorage to CumulusStorage (keeping backwards compatibility)
-* Fix Django 1.7 support
-* Bugfixes
+* Migrate from python-cloudfiles to pyrax
+* Remove unneeded context_processors
+* Remove unused management commands
 
-
-Version 1.0.13, 1 September 2014
-********************************
-
-* Revive the changelog
-* Among other things django-cumulus is based on pyrax
-* New people taking care of this project now
-* Too much history to list here, sorry
 
 Version 1.0.5, 30 January 2012
 ******************************
 
-* Combine syncstatic and syncmedia into to syncfiles (backwards
-  incompatible change)
 * Added CloudFilesStaticStorage subclass for collectstatic compatability
 * Added thread-safe CloudFilesStorage subclass
 * Added four new management commands
@@ -62,7 +51,7 @@ Version 0.3.6, 19 January 2011
 * Resolved `issue 5`_, adding ``CUMULUS_TIMEOUT`` setting to specify default connection timeout
 * Restructured tests to work properly with django-nose
 
-.. _issue 5: https://github.com/django-cumulus/django-cumulus/issues/issue/5
+.. _issue 5: https://github.com/richleland/django-cumulus/issues/issue/5
 
 Version 0.3.5, 07 January 2011
 ******************************
