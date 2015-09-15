@@ -1,9 +1,10 @@
 import logging
 import mimetypes
 import os
-import re
 import pyrax
+import re
 import socket
+import tempfile
 
 from httplib import HTTPException
 from io import UnsupportedOperation
@@ -307,8 +308,10 @@ class CachedCloudFilesStaticStorage(CloudFilesStaticStorage):
 class CloudFilesStorageFile(File):
     closed = False
 
-    def __init__(self, container, name, *args, **kwargs):
+    def __init__(self, container, name, mode="r", *args, **kwargs):
         self._container = container
+        self._file = None
+        self._mode = mode
         super(CloudFilesStorageFile, self).__init__(file=None, name=name,
                                                     *args, **kwargs)
 
@@ -322,49 +325,21 @@ class CloudFilesStorageFile(File):
     size = property(_get_size, _set_size)
 
     def _get_file(self):
-        if not hasattr(self, '_file'):
-            self._file = self._container._get_cloud_obj(self.name)
+        if self._file is None:
+            self._file = tempfile.SpooledTemporaryFile(
+                max_size=self.DEFAULT_CHUNK_SIZE,
+                suffix=".cumulus",
+                dir=tempfile.mkdtemp()
+            )
+            self._file.write(self._container._get_cloud_obj(self.name).get())
+
+            if 'r' in self._mode:
+                self._is_dirty = False
+                self._file.seek(0)
+
             self._pos = 0
         return self._file
 
     def _set_file(self, value):
-        if value is None:
-            if hasattr(self, '_file'):
-                del self._file
-        else:
-            self._file = value
+        self._file = value
     file = property(_get_file, _set_file)
-
-    def __iter__(self):
-        for chunk in self.chunks():
-            yield chunk
-
-    def chunks(self, chunk_size=None):
-        """Read the file and yield chunks of ``chunk_size`` bytes
-        (defaults to ``UploadedFile.DEFAULT_CHUNK_SIZE``).
-
-        """
-        if not chunk_size:
-            chunk_size = self.DEFAULT_CHUNK_SIZE
-
-        try:
-            self.seek(0)
-        except (AttributeError, UnsupportedOperation):
-            pass
-
-        while True:
-            data = self.file.get(chunk_size=chunk_size)
-            if not data:
-                break
-            yield data
-
-    def read(self, num_bytes=0):
-        if self._pos == self.size:
-            return ""
-
-        if num_bytes and self._pos + num_bytes > self.size:
-            num_bytes = self.size - self._pos
-
-        data = self.file.get()
-        self._pos += len(data)
-        return data
