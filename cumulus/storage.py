@@ -306,8 +306,6 @@ class CachedCloudFilesStaticStorage(CloudFilesStaticStorage):
 
 
 class CloudFilesStorageFile(File):
-    closed = False
-
     def __init__(self, container, name, mode="r", *args, **kwargs):
         self._container = container
         self._file = None
@@ -329,7 +327,6 @@ class CloudFilesStorageFile(File):
             self._file = tempfile.SpooledTemporaryFile(
                 max_size=self.DEFAULT_CHUNK_SIZE,
                 suffix=".cumulus",
-                dir=tempfile.mkdtemp()
             )
             self._file.write(self._container._get_cloud_obj(self.name).get())
 
@@ -342,4 +339,5 @@ class CloudFilesStorageFile(File):
 
     def _set_file(self, value):
         self._file = value
+
     file = property(_get_file, _set_file)
